@@ -90,6 +90,8 @@ typedef struct {
 	bool redraw;
 
 	struct wl_list link;
+	int shm_fd;
+	uint32_t *data;
 } Bar;
 
 typedef struct {
@@ -351,24 +353,15 @@ static int
 draw_frame(Bar *bar)
 {
 	/* Allocate buffer to be attached to the surface */
-        int fd = allocate_shm_file(bar->bufsize);
-	if (fd == -1)
-		return -1;
 
-	uint32_t *data = mmap(NULL, bar->bufsize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-	if (data == MAP_FAILED) {
-		close(fd);
-		return -1;
-	}
 
-	struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, bar->bufsize);
+	struct wl_shm_pool *pool = wl_shm_create_pool(shm,bar->shm_fd , bar->bufsize);
 	struct wl_buffer *buffer = wl_shm_pool_create_buffer(pool, 0, bar->width, bar->height, bar->stride, WL_SHM_FORMAT_ARGB8888);
 	wl_buffer_add_listener(buffer, &wl_buffer_listener, NULL);
 	wl_shm_pool_destroy(pool);
-	close(fd);
 
 	/* Pixman image corresponding to main buffer */
-	pixman_image_t *final = pixman_image_create_bits(PIXMAN_a8r8g8b8, bar->width, bar->height, data, bar->width * 4);
+	pixman_image_t *final = pixman_image_create_bits(PIXMAN_a8r8g8b8, bar->width, bar->height, bar->data, bar->width * 4);
 	
 	/* Text background and foreground layers */
 	pixman_image_t *foreground = pixman_image_create_bits(PIXMAN_a8r8g8b8, bar->width, bar->height, NULL, bar->width * 4);
@@ -459,8 +452,6 @@ draw_frame(Bar *bar)
 	pixman_image_unref(background);
 	pixman_image_unref(final);
 	
-	munmap(data, bar->bufsize);
-
 	wl_surface_set_buffer_scale(bar->wl_surface, buffer_scale);
 	wl_surface_attach(bar->wl_surface, buffer, 0, 0);
 	wl_surface_damage_buffer(bar->wl_surface, 0, 0, bar->width, bar->height);
@@ -481,13 +472,22 @@ layer_surface_configure(void *data, struct zwlr_layer_surface_v1 *surface,
 	w *= buffer_scale;
 	h *= buffer_scale;
 
-	if (bar->configured && w == bar->width && h == bar->height)
-		return;
-	
+	if (bar->configured) {
+		if (w == bar->width && h == bar->height)
+			return;
+		munmap(bar->data, bar->bufsize);
+		close(bar->shm_fd);
+        } else {
+		bar->shm_fd=allocate_shm_file(h*w*4);
+        }
 	bar->width = w;
 	bar->height = h;
 	bar->stride = bar->width * 4;
 	bar->bufsize = bar->stride * bar->height;
+	bar->data = mmap(NULL, bar->bufsize, PROT_READ | PROT_WRITE, MAP_SHARED, bar->shm_fd, 0);
+	if (data == MAP_FAILED) {
+		close(bar->shm_fd);
+	}
 	bar->configured = true;
 
 	draw_frame(bar);
@@ -1004,6 +1004,8 @@ teardown_bar(Bar *bar)
 		wl_surface_destroy(bar->wl_surface);
 	}
 	wl_output_destroy(bar->wl_output);
+	close(bar->shm_fd);
+	munmap(bar->data, bar->bufsize);
 	free(bar);
 }
 
